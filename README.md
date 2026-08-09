@@ -22,7 +22,7 @@ Windows는 `spawn` 방식이므로 lambda나 지역 함수는 큐로 넘길 수 
 ```python
 from multiprocessing import Queue
 
-from taskexecutor import FuncExecutorException, WorkProcess
+from taskexecutor import TaskExecutionError, TaskExecutorProcess
 
 
 def my_task():            # 모듈 최상위 정의 (pickle 가능)
@@ -32,7 +32,7 @@ def my_task():            # 모듈 최상위 정의 (pickle 가능)
 if __name__ == "__main__":   # Windows에서는 필수
     task_queue = Queue()
 
-    worker = WorkProcess(task_queue)
+    worker = TaskExecutorProcess(task_queue)
     worker.start()
 
     # producer 쪽: 작업을 만들어 큐에 넣는다
@@ -47,7 +47,7 @@ if __name__ == "__main__":   # Windows에서는 필수
     worker.join()
 
     for item in results:
-        if isinstance(item, FuncExecutorException):
+        if isinstance(item, TaskExecutionError):
             print("실패:", item)
         else:
             print("성공:", item)
@@ -56,10 +56,14 @@ if __name__ == "__main__":   # Windows에서는 필수
 ### 결과 받기
 
 작업의 반환값과 실패 정보는 모두 `result_queue`로 온다. 실패한 작업은
-`FuncExecutorException`으로 감싸져 오므로 `isinstance`로 구분한다.
+`TaskExecutionError`으로 감싸져 오므로 `isinstance`로 구분한다.
 
 - `collect()` — 워커가 종료될 때까지 기다리며 결과를 모두 모은다. 종료 시 사용.
-- `results()` — 지금 도착해 있는 것만 꺼낸다. 워커를 계속 돌리면서 중간 확인용.
+- `get_task_result(timeout=None)` — 결과를 하나만 꺼낸다. 꺼낼 개수를 알 때 사용.
+
+`get_task_result()`는 기본적으로 결과가 올 때까지 무한 대기한다. 올 결과가 없으면
+영원히 멈추므로, 제출한 작업 수만큼만 부르거나 `timeout`을 주어야 한다. `timeout`을
+주면 그 시간 안에 결과가 없을 때 `queue.Empty`가 발생한다.
 
 **`join()` 전에 반드시 결과 큐를 비워야 한다.** 큐에 데이터를 넣은 프로세스는
 버퍼가 파이프로 다 빠져나갈 때까지 종료되지 못한다. 비우지 않고 `join()`하면
@@ -68,14 +72,14 @@ if __name__ == "__main__":   # Windows에서는 필수
 
 ### 종료에 대해
 
-`WorkProcess`는 non-daemon 프로세스다. 종료 신호를 보내지 않으면 워커가 큐에서
+`TaskExecutorProcess`는 non-daemon 프로세스다. 종료 신호를 보내지 않으면 워커가 큐에서
 계속 대기하므로 **부모 프로세스도 종료되지 않는다.** 반드시 `stop()`으로 마무리한다.
 
 워커를 여러 개 띄웠다면 워커 수만큼 종료 신호가 필요하다. 신호 하나는 워커 하나만
 꺼내 가기 때문이다.
 
 ```python
-workers = [WorkProcess(task_queue) for _ in range(4)]
+workers = [TaskExecutorProcess(task_queue) for _ in range(4)]
 for w in workers:
     w.start()
 
@@ -95,14 +99,19 @@ for w in workers:
 ### 작업 실패
 
 task 내부에서 예외가 발생하면 워커는 죽지 않는다. traceback을 로그로 남기고,
-`FuncExecutorException`으로 감싸 결과 큐에 넣고, 다음 작업으로 넘어간다.
+`TaskExecutionError`으로 감싸 결과 큐에 넣고, 다음 작업으로 넘어간다.
 예외를 부모 프로세스로 던지지는 않는다 — `raise`는 프로세스 경계를 넘지 못하며,
 `run()` 밖으로 예외가 새어나가면 워커만 조용히 죽고 부모는 그 사실을 알지 못한다.
 
-`FuncExecutorException`은 원본 예외 객체가 아니라 작업 이름과 traceback 문자열만
+`TaskExecutionError`은 원본 예외 객체가 아니라 작업 이름과 traceback 문자열만
 담는다. 원본 예외는 그 자체가 pickle 불가능할 수 있어서, 실패를 알리려던 통로가
 다시 실패하게 된다.
 
-반환값이 pickle 불가능한 경우에도 같은 방식으로 보고된다. `Queue.put()`은 버퍼에
-넣고 바로 리턴하고 직렬화는 뒤에서 feeder 스레드가 하기 때문에, 그냥 넣으면
-결과가 조용히 사라진다. 그래서 보내기 전에 직렬화 가능 여부를 미리 확인한다.
+단, **반환값은 pickle 가능해야 한다.** `Queue.put()`은 버퍼에 넣고 바로 리턴하고
+직렬화는 뒤에서 feeder 스레드가 하기 때문에, 반환값을 보낼 수 없으면 예외가 나지
+않고 그 결과가 조용히 사라진다. 로그에는 `Task Finished`가 남지만 부모는 아무것도
+받지 못한다.
+
+유실 범위는 그 결과 하나가 아니다. feeder 스레드가 직렬화 실패로 루프를 벗어나기
+때문에, 타이밍에 따라 **뒤이어 보낸 결과들까지 함께 버려진다.** 실측에서 6회 중
+3회는 뒤에 있던 결과 3개가 통째로 사라졌다. 작업은 평범한 데이터만 반환해야 한다.
