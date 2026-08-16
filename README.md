@@ -10,7 +10,7 @@
 ## 설치
 
 ```bash
-pip install git+https://github.com/WsuRagDocumentAssistant/TestRepository.git
+pip install git+https://github.com/WsuRagDocumentAssistant/TaskExecutor.git
 ```
 
 ## 사용법
