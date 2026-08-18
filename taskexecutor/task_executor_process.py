@@ -23,19 +23,25 @@ def _task_name(task) -> str:
 # Worker Process
 # ------------------------
 
-class TaskExecutorProcess(Process):
+class TaskExecutor(Process):
     """작업 큐에서 꺼낸 작업을 실행하고 결과를 결과 큐로 보낸다.
 
     작업이 pickle 가능한지 보장하는 것은 작업을 만드는 쪽의 책임이다.
     """
 
-    def __init__(self, task_queue: Queue):
+    def __init__(self):
         super().__init__()
-        self.task_queue = task_queue
+        self.task_queue = create_queue()
         # 생성은 팩토리 함수(multiprocessing.Queue)로 해야 한다.
         # 위의 multiprocessing.queues.Queue는 힌트 전용이며 ctx가 필수라
         # 직접 호출할 수 없다.
         self.result_queue = create_queue()
+
+    def get_result_queue(self):
+        return self.result_queue
+    
+    def get_task_queue(self):
+            return self.task_queue
 
     def stop(self) -> None:
         """워커에게 종료를 요청한다.
