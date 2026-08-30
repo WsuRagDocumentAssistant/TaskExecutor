@@ -112,4 +112,4 @@ class TaskExecutor(Process):
                 )
             else:
                 logger.info("Task Finished")
-                self.result_queue.put(result)
+                self.result_queue.put((task, result))
