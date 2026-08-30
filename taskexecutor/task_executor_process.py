@@ -98,7 +98,7 @@ class TaskExecutor(Process):
                 break
 
             try:
-                result = task()
+                result = task(task.params)
             except Exception:
                 # 작업 하나가 실패해도 워커는 계속 살아있어야 한다.
                 # run() 밖으로 예외를 던지면 워커가 죽고, 그 예외는
