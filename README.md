@@ -15,48 +15,77 @@ pip install git+https://github.com/WsuRagDocumentAssistant/TaskExecutor.git
 
 ## 사용법
 
-작업(task)은 인자 없이 호출 가능한 객체여야 하고, **pickle 가능해야 한다.**
-Windows는 `spawn` 방식이므로 lambda나 지역 함수는 큐로 넘길 수 없다.
-모듈 최상위에 정의된 함수/클래스를 사용한다.
+작업(task)은 **`params` 속성을 가진 호출 가능한 객체**여야 한다. 워커는 이것을
+`task(task.params)` 로 실행한다. 그리고 **pickle 가능해야 한다** — Windows는 `spawn`
+방식이므로 lambda나 지역 함수는 큐로 넘길 수 없고, 모듈 최상위에 정의된 클래스를 쓴다.
+
+작업 큐와 결과 큐는 `TaskExecutor` 가 직접 만든다. `get_task_queue()` /
+`get_result_queue()` 로 꺼내 쓴다.
 
 ```python
-from multiprocessing import Queue
-
-from taskexecutor import TaskExecutionError, TaskExecutorProcess
+from taskexecutor import TaskExecutionError, TaskExecutor
 
 
-def my_task():            # 모듈 최상위 정의 (pickle 가능)
-    return "작업 결과"
+class MyTask:                     # 모듈 최상위 정의 (pickle 가능)
+    def __init__(self, params):
+        self.params = params
+
+    def __call__(self, params):
+        return f"작업 결과: {params['job_id']}"
 
 
-if __name__ == "__main__":   # Windows에서는 필수
-    task_queue = Queue()
-
-    worker = TaskExecutorProcess(task_queue)
+if __name__ == "__main__":        # Windows에서는 필수
+    worker = TaskExecutor()
+    task_queue = worker.get_task_queue()
     worker.start()
 
     # producer 쪽: 작업을 만들어 큐에 넣는다
-    for _ in range(5):
-        task_queue.put(my_task)
+    for i in range(5):
+        task_queue.put(MyTask({"job_id": i}))
 
     # 더 이상 넣을 작업이 없으면 종료 신호를 보낸다.
     # 큐에 남아있는 작업은 모두 처리한 뒤 워커가 종료된다.
     worker.stop()
 
-    results = worker.collect()   # join() 전에 결과를 비운다
+    results = worker.collect()    # join() 전에 결과를 비운다
     worker.join()
 
-    for item in results:
-        if isinstance(item, TaskExecutionError):
-            print("실패:", item)
+    for task, result in results:
+        if isinstance(result, TaskExecutionError):
+            print(f"실패 (job_id={task.params['job_id']}):", result)
         else:
-            print("성공:", item)
+            print(f"성공 (job_id={task.params['job_id']}):", result)
 ```
+
+### 동시 실행
+
+`max_workers` 를 2 이상으로 주면 작업을 스레드풀에 위임해 동시에 실행한다.
+
+```python
+worker = TaskExecutor(max_workers=4)
+```
+
+기본값 1은 작업 하나를 끝까지 실행한 뒤 다음 것을 꺼내는 순차 동작이다. 이때는
+스레드풀을 아예 만들지 않으므로 동작이 완전히 같다.
+
+동시 실행이 필요한 전형적인 상황은 **오래 걸리는 작업 하나가 가벼운 작업들을
+막는 것**이다. 3초짜리 작업 뒤에 즉시 끝나는 작업 3개를 넣고 결과가 도착한 시각:
+
+| | 무거운 작업 | 가벼운 작업 3개 |
+|---|---|---|
+| `max_workers=1` | 3.08s | 3.08s (뒤에서 대기) |
+| `max_workers=4` | 3.08s | 0.08s |
+
+다만 스레드풀이라 **GIL의 제약을 받는다.** I/O 대기(파일·네트워크·DB)나 네이티브
+연산(numpy·torch·ONNX처럼 계산 중 GIL을 놓는 것)에는 효과가 있지만, 순수 파이썬
+계산에는 효과가 없다. 실측에서 순수 파이썬 루프는 4스레드로 1.0배(효과 없음),
+numpy 행렬곱은 2.2배였다.
 
 ### 결과 받기
 
-작업의 반환값과 실패 정보는 모두 `result_queue`로 온다. 실패한 작업은
-`TaskExecutionError`으로 감싸져 오므로 `isinstance`로 구분한다.
+성공이든 실패든 `(task, 결과)` 한 쌍으로 결과 큐에 온다. 실패는 결과 자리에
+`TaskExecutionError` 가 들어오므로 `isinstance` 로 구분한다. 실패에도 `task` 가
+실려 있어서, 받는 쪽은 `task.params` 로 어느 요청의 결과인지 짝지을 수 있다.
 
 - `collect()` — 워커가 종료될 때까지 기다리며 결과를 모두 모은다. 종료 시 사용.
 - `get_task_result(timeout=None)` — 결과를 하나만 꺼낸다. 꺼낼 개수를 알 때 사용.
@@ -72,14 +101,23 @@ if __name__ == "__main__":   # Windows에서는 필수
 
 ### 종료에 대해
 
-`TaskExecutorProcess`는 non-daemon 프로세스다. 종료 신호를 보내지 않으면 워커가 큐에서
+`TaskExecutor`는 non-daemon 프로세스다. 종료 신호를 보내지 않으면 워커가 큐에서
 계속 대기하므로 **부모 프로세스도 종료되지 않는다.** 반드시 `stop()`으로 마무리한다.
 
-워커를 여러 개 띄웠다면 워커 수만큼 종료 신호가 필요하다. 신호 하나는 워커 하나만
-꺼내 가기 때문이다.
+`max_workers` 를 준 경우, `stop()` 을 받은 시점에 스레드에서 아직 돌고 있는 작업이
+있으면 그것들이 결과를 다 넣을 때까지 기다린 뒤 종료한다. 진행 중이던 요청이
+결과를 못 받고 매달리는 일은 없다.
+
+워커 프로세스를 여러 개 띄워 큐를 공유하는 것도 가능하다. 이때는 워커 수만큼 종료
+신호가 필요하다 — 신호 하나는 워커 하나만 꺼내 가기 때문이다.
 
 ```python
-workers = [TaskExecutorProcess(task_queue) for _ in range(4)]
+workers = [TaskExecutor() for _ in range(4)]
+shared_task_queue = workers[0].get_task_queue()
+shared_result_queue = workers[0].get_result_queue()
+for w in workers[1:]:                 # start() 전에 바꿔 끼우면 자식에게 함께 넘어간다
+    w.task_queue = shared_task_queue
+    w.result_queue = shared_result_queue
 for w in workers:
     w.start()
 
@@ -87,11 +125,10 @@ for w in workers:
 
 for w in workers:
     w.stop()          # 워커 1개당 신호 1개
-for w in workers:
-    results += w.collect()
-for w in workers:
-    w.join()
 ```
+
+단, 프로세스를 늘리면 메모리가 따로다. 무거운 모델을 로드하는 작업이라면 프로세스
+수만큼 모델이 중복 적재되므로, 그런 경우엔 `max_workers` 로 스레드를 늘리는 쪽이 맞다.
 
 `terminate()`는 실행 중인 작업을 중간에 끊고 큐에 남은 작업도 버리므로, 정상 종료
 경로로 쓰지 않는다.
@@ -99,7 +136,7 @@ for w in workers:
 ### 작업 실패
 
 task 내부에서 예외가 발생하면 워커는 죽지 않는다. traceback을 로그로 남기고,
-`TaskExecutionError`으로 감싸 결과 큐에 넣고, 다음 작업으로 넘어간다.
+`(task, TaskExecutionError)` 로 결과 큐에 넣고, 다음 작업으로 넘어간다.
 예외를 부모 프로세스로 던지지는 않는다 — `raise`는 프로세스 경계를 넘지 못하며,
 `run()` 밖으로 예외가 새어나가면 워커만 조용히 죽고 부모는 그 사실을 알지 못한다.
 
