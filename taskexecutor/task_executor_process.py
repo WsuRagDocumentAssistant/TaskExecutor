@@ -1,7 +1,6 @@
 import logging
 import queue
 import traceback
-from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 from multiprocessing import Process, Queue as create_queue
@@ -27,15 +26,13 @@ def _task_name(task) -> str:
 class TaskExecutor(Process):
     """작업 큐에서 꺼낸 작업을 실행하고 결과를 결과 큐로 보낸다.
 
-    작업이 pickle 가능한지 보장하는 것은 작업을 만드는 쪽의 책임이다.
+    작업 하나를 끝까지 실행한 뒤 다음 것을 꺼내는 순차 동작이다.
 
-    max_workers를 2 이상으로 주면 작업을 스레드풀에 위임해 동시에 실행한다.
-    기본값 1은 작업 하나를 끝까지 실행한 뒤 다음 것을 꺼내는 순차 동작이다.
+    작업이 pickle 가능한지 보장하는 것은 작업을 만드는 쪽의 책임이다.
     """
 
-    def __init__(self, max_workers: int = 1):
+    def __init__(self):
         super().__init__()
-        self.max_workers = max_workers
         self.task_queue = create_queue()
         # 생성은 팩토리 함수(multiprocessing.Queue)로 해야 한다.
         # 위의 multiprocessing.queues.Queue는 힌트 전용이며 ctx가 필수라
@@ -116,30 +113,16 @@ class TaskExecutor(Process):
         if not logging.getLogger().handlers:
             logging.basicConfig(
                 level=logging.INFO,
-                format="[%(processName)s/%(threadName)s] %(levelname)s %(message)s",
+                format="[%(processName)s] %(levelname)s %(message)s",
             )
 
         logger.info("Worker Start")
 
-        # max_workers가 1이면 풀을 만들지 않는다. 풀을 쓰면 실행이 워커
-        # 스레드로 옮겨가고 다음 작업을 미리 꺼내 쌓아두게 되어, 기본값에서
-        # 지금까지의 동작과 미묘하게 달라진다.
-        pool = ThreadPoolExecutor(self.max_workers) if self.max_workers > 1 else None
+        while True:
+            task = self.task_queue.get()   # 작업이 올 때까지 대기
 
-        try:
-            while True:
-                task = self.task_queue.get()   # 작업이 올 때까지 대기
+            if task is SHUTDOWN:           # 종료 신호
+                logger.info("Worker Stop")
+                break
 
-                if task is SHUTDOWN:           # 종료 신호
-                    logger.info("Worker Stop")
-                    break
-
-                if pool is None:
-                    self._execute(task)              # 끝날 때까지 여기 머문다
-                else:
-                    pool.submit(self._execute, task) # 위임하고 바로 다음 작업을 꺼낸다
-        finally:
-            if pool is not None:
-                # 진행 중인 작업이 결과를 넣을 때까지 기다린다. 이게 없으면
-                # 그 요청들은 결과를 못 받고 타임아웃까지 매달린다.
-                pool.shutdown(wait=True)
+            self._execute(task)            # 끝날 때까지 여기 머문다
