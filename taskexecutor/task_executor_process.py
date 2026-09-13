@@ -1,4 +1,3 @@
-import inspect
 import logging
 import queue
 import traceback
@@ -110,46 +109,26 @@ class TaskExecutor(Process):
 
         성공이든 실패든 (task, 결과) 한 쌍으로 보낸다. 받는 쪽이 결과와
         요청을 짝지으려면 실패에도 task가 실려 있어야 한다.
-
-        작업이 제너레이터를 반환하면 첫 yield 값을 먼저 결과로 보내고,
-        나머지는 같은 스레드에서 끝까지 돌린다. 첫 yield 이후의 예외는
-        결과 큐에 넣지 않고 로그만 남긴다 (상태는 작업 쪽이 기록한다).
         """
-        name = _task_name(task)
         try:
             result = task(task.params)
-
-            if not inspect.isgenerator(result):
-                logger.info("Task Finished: %s", name)
-                self.result_queue.put((task, result))
-                return
-
-            try:
-                first = next(result)
-            except StopIteration as stop:            # yield 없이 return만 한 경우
-                logger.info("Task Finished: %s", name)
-                self.result_queue.put((task, stop.value))
-                return
-            # 첫 yield 전 예외는 바깥 except가 TaskExecutionError로 보낸다
-
-            logger.info("Task Replied: %s", name)
-            self.result_queue.put((task, first))     # 먼저 답할 값
-            try:
-                for _ in result:                     # 나머지를 같은 스레드에서 끝까지
-                    pass
-            except Exception:
-                # 결과 큐에는 넣지 않는다. 상태는 작업 쪽이 기록한다.
-                logger.exception("Task Failed after early reply: %s", name)
-            else:
-                logger.info("Task Finished: %s", name)
         except Exception:
             # 작업 하나가 실패해도 워커는 계속 살아있어야 한다.
             # run() 밖으로 예외를 던지면 워커가 죽고, 그 예외는
             # 부모에게 전달되지도 않는다. 실패는 결과 큐로 실어 보낸다.
-            logger.exception("Task Failed: %s", name)
+            logger.exception("Task Failed: %s", _task_name(task))
             self.result_queue.put(
-                (task, TaskExecutionError(name, traceback.format_exc()))
+                (
+                    task,
+                    TaskExecutionError(
+                        _task_name(task),
+                        traceback.format_exc(),
+                    ),
+                )
             )
+        else:
+            logger.info("Task Finished: %s", _task_name(task))
+            self.result_queue.put((task, result))
 
     def run(self) -> None:
         # spawn 방식에서는 자식이 새 인터프리터로 시작하므로
